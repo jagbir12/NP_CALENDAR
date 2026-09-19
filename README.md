@@ -2,7 +2,9 @@
 
 A single-file, offline-capable, mobile-first Nepali (Bikram Sambat) calendar.
 Everything — markup, styles, data, and logic — lives in `index.html`. No
-build step, no dependencies beyond an optional Google Fonts request.
+build step. The only external dependencies are an optional Google Fonts
+request and, for the notes feature, the Supabase JS client + your Supabase
+project.
 
 Open `index.html` directly in a browser to use it.
 
@@ -25,6 +27,10 @@ Open `index.html` directly in a browser to use it.
   boundaries at the edges), Enter/Space opens the details dialog. Grid
   cells use `role="grid"`/`"gridcell"` and `aria-label`s carrying the full
   spoken date.
+- Per-day notes, backed by Supabase: open a day's details dialog to see
+  and add free-text notes for that date, and delete them. Days with notes
+  get a small blue dot on the grid (distinct from the orange holiday dot).
+  See "Notes / Supabase setup" below.
 - A "Self-tests" panel at the bottom re-runs on every load: it checks the
   BS↔AD conversion against several independently verified reference dates
   (see below), a leap-year AD date, a BS year boundary, and out-of-range
@@ -106,16 +112,44 @@ left out rather than approximated. There's an empty
    };
    ```
 
+## Notes / Supabase setup
+
+Per-day notes are stored in a Supabase Postgres table and read/written
+straight from the browser with the public **anon** key — there's no login
+system in this app.
+
+1. Run [`supabase-schema.sql`](supabase-schema.sql) in your Supabase
+   project's SQL editor. It creates the `calendar_notes` table and Row
+   Level Security policies that let the `anon` role select/insert/delete.
+2. In `index.html`, `SUPABASE_URL` and `SUPABASE_ANON_KEY` near the top of
+   the `<script>` block (search for "PER-DAY NOTES") are already set for
+   this project's Supabase instance. To point at a different project,
+   replace those two values — the URL is on the **Data API** settings
+   page, the key is the one labeled **`anon` / `public`** (sometimes shown
+   as a "publishable key") on the **API Keys** page. Never put the
+   `service_role` / secret key here — it bypasses RLS and must stay
+   server-side only.
+3. The anon key is safe to have visible in client-side code by design (RLS
+   is what enforces access rules, not key secrecy) — but as shipped, the
+   policies allow **anyone who loads the page** to add or delete notes,
+   since there's no auth to scope them by user. That's fine for a
+   personal/local tool. If you host this page publicly and want real
+   access control, add Supabase Auth and change the policies in
+   `supabase-schema.sql` to check `auth.uid()` instead of allowing `anon`
+   everything.
+4. If the Supabase script fails to load (offline, blocked CDN, wrong
+   keys), the calendar itself still works — only the notes panel shows an
+   inline "unavailable" message instead of the add-note form.
+
 ## Offline use
 
 The only network dependency is the optional Google Fonts link (Noto Sans
-Devanagari) in `<head>`. If you need the page to work with zero network
-requests at all (e.g. first load with no internet), delete the two
-`<link>` tags for `fonts.googleapis.com` / `fonts.gstatic.com` — the CSS
-font stack already falls back to system Devanagari fonts (`Nirmala UI` on
-Windows, etc.), so the layout and script are unaffected either way. Once
-loaded once, the page has no other external calls and works fully offline
-on reload (browser font cache permitting).
+Devanagari) in `<head>`, plus the Supabase JS client (for notes) and calls
+to your Supabase project. The calendar/converter/self-tests work with zero
+network requests — delete the Google Fonts `<link>` tags and the Supabase
+`<script src>` (and its usages) if you want a version with no external
+calls at all; the CSS font stack already falls back to system Devanagari
+fonts (`Nirmala UI` on Windows, etc.) either way.
 
 ## Supported range
 

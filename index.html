@@ -145,6 +145,10 @@
     position:absolute; top:5px; right:7px; width:6px; height:6px; border-radius:50%;
     background:var(--holiday-dot);
   }
+  .day-cell .note-dot{
+    position:absolute; top:5px; left:7px; width:6px; height:6px; border-radius:50%;
+    background:var(--focus-ring);
+  }
   .day-cell:focus-visible{ outline:2.5px solid var(--focus-ring); outline-offset:1px; }
 
   .legend{ display:flex; gap:14px; flex-wrap:wrap; margin:12px 2px 0; font-size:0.78rem; color:var(--text-muted); }
@@ -152,6 +156,7 @@
   .legend i{ width:8px; height:8px; border-radius:50%; display:inline-block; }
   .legend i.hol{ background:var(--holiday-dot); }
   .legend i.tod{ background:var(--today-ring); }
+  .legend i.note{ background:var(--focus-ring); }
 
   /* ---------- Panels (converter / tests) ---------- */
   details.panel{
@@ -194,6 +199,27 @@
   .event-item{ display:flex; gap:8px; align-items:center; padding:6px 0; font-size:0.9rem; }
   .event-item i{ width:7px; height:7px; border-radius:50%; background:var(--holiday-dot); flex:none; }
   .muted{ color:var(--text-muted); font-size:0.88rem; }
+
+  .notes-block{ margin-top:14px; padding-top:12px; border-top:1px solid var(--border); }
+  .notes-heading{ font-size:0.85rem; margin:0 0 8px; color:var(--text-muted); font-weight:600; }
+  .note-item{
+    display:flex; align-items:flex-start; justify-content:space-between; gap:8px;
+    padding:7px 0; border-bottom:1px solid var(--border); font-size:0.9rem;
+  }
+  .note-item span{ white-space:pre-wrap; word-break:break-word; }
+  .note-del{
+    flex:none; border:none; background:none; padding:2px 6px; color:var(--text-muted);
+    font-size:0.85rem; border-radius:6px;
+  }
+  .note-del:hover{ background:var(--bg-muted); color:var(--saturday); }
+  .note-form{ display:flex; flex-direction:column; gap:6px; margin-top:10px; }
+  .note-form textarea{
+    font-family:inherit; font-size:0.9rem; padding:8px; border-radius:8px;
+    border:1px solid var(--border); background:var(--bg-elevated); color:var(--text); resize:vertical;
+  }
+  .note-form button{ align-self:flex-end; }
+  .note-status{ min-height:1em; }
+  .note-status.error{ color:var(--saturday); }
 
   #pickerDialog select{ width:100%; margin-bottom:10px; }
   .picker-actions{ display:flex; gap:8px; justify-content:flex-end; margin-top:6px; }
@@ -239,6 +265,7 @@
   <div class="legend">
     <span><i class="tod"></i><span id="legendToday">आज</span></span>
     <span><i class="hol"></i><span id="legendHoliday">चाड/बिदा</span></span>
+    <span><i class="note"></i><span id="legendNote">नोट</span></span>
     <span style="color:var(--saturday)">■ <span id="legendSat">शनिबार (साप्ताहिक बिदा)</span></span>
   </div>
 
@@ -309,6 +336,7 @@
   </div>
 </dialog>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script>
 /* =========================================================================
    BIKRAM SAMBAT (BS) CALENDAR DATA
@@ -409,6 +437,71 @@ const FIXED_BS_HOLIDAYS = [
 /* Year-specific / lunar events go here, keyed "BSyear-month-day".
    Left empty intentionally -- populate from a verified yearly source. */
 const LUNAR_HOLIDAYS_BY_DATE = {};
+
+/* =========================================================================
+   PER-DAY NOTES (Supabase)
+   -------------------------------------------------------------------------
+   User-added notes are stored in a Supabase table (`calendar_notes`, see
+   supabase-schema.sql) and fetched with the public "anon" key -- there is
+   no login system in this app, so RLS on that table allows anon
+   read/insert/delete. That's an acceptable tradeoff for a personal/local
+   tool; if this page is ever hosted publicly, add Supabase Auth and lock
+   the policies down to auth.uid() instead of leaving them open to anyone
+   who loads the page. If the Supabase library fails to load (e.g. no
+   network), the calendar itself still works -- only the notes feature
+   degrades, with an inline error where relevant.
+   ========================================================================= */
+const SUPABASE_URL = 'https://ozamnocmyasgrfociewq.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im96YW1ub2NteWFzZ3Jmb2NpZXdxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk3OTExMDcsImV4cCI6MjEwNTM2NzEwN30.WOXEP9xF-fHgn9nekgI4Z-T6ZNi9GgsWigzdydyNyhk';
+
+let sb = null;
+try {
+  if (window.supabase && window.supabase.createClient) {
+    sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  }
+} catch (e) { console.error('Supabase client init failed', e); }
+
+let notesCache = {}; // "y-m-d" -> array of {id, note, created_at} rows, newest last
+let notesLoaded = false;
+
+function noteKey(y,m,d){ return `${y}-${m}-${d}`; }
+function notesFor(y,m,d){ return notesCache[noteKey(y,m,d)] || []; }
+
+async function loadAllNotes(){
+  if (!sb) return;
+  const { data, error } = await sb.from('calendar_notes').select('*').order('created_at', { ascending:true });
+  if (error) { console.error('Failed to load notes', error); return; }
+  const cache = {};
+  data.forEach(row => {
+    const k = noteKey(row.bs_year, row.bs_month, row.bs_day);
+    (cache[k] = cache[k] || []).push(row);
+  });
+  notesCache = cache;
+  notesLoaded = true;
+  render();
+}
+
+async function addNote(y,m,d,text){
+  if (!sb) throw new Error('offline');
+  const ad = bsToAD(y,m,d);
+  const ad_date = `${ad.gy}-${String(ad.gm).padStart(2,'0')}-${String(ad.gd).padStart(2,'0')}`;
+  const { data, error } = await sb.from('calendar_notes')
+    .insert({ bs_year:y, bs_month:m, bs_day:d, ad_date, note:text })
+    .select().single();
+  if (error) throw error;
+  const k = noteKey(y,m,d);
+  (notesCache[k] = notesCache[k] || []).push(data);
+  render();
+}
+
+async function deleteNote(id,y,m,d){
+  if (!sb) throw new Error('offline');
+  const { error } = await sb.from('calendar_notes').delete().eq('id', id);
+  if (error) throw error;
+  const k = noteKey(y,m,d);
+  notesCache[k] = (notesCache[k] || []).filter(n => n.id !== id);
+  render();
+}
 
 /* =========================================================================
    CONVERSION (pure day-count arithmetic, anchored at EPOCH_AD_MS above)
@@ -530,6 +623,7 @@ function applyStaticLabels(){
   el('nextBtn').setAttribute('aria-label', ne ? 'अर्को महिना' : 'Next month');
   el('legendToday').textContent = ne ? 'आज' : 'Today';
   el('legendHoliday').textContent = ne ? 'चाड / बिदा' : 'Holiday / event';
+  el('legendNote').textContent = ne ? 'नोट' : 'Note';
   el('legendSat').textContent = ne ? 'शनिबार (साप्ताहिक बिदा)' : 'Saturday (weekly holiday)';
   el('converterSummary').textContent = ne ? 'मिति परिवर्तक (BS ⇄ AD)' : 'Date Converter (BS ⇄ AD)';
   el('bsToAdLabel').textContent = ne ? 'बिक्रम सम्वत → ईस्वी सन्' : 'Bikram Sambat → AD';
@@ -623,6 +717,11 @@ function renderGrid(){
       const dot = document.createElement('span');
       dot.className = 'holiday-dot';
       cell.appendChild(dot);
+    }
+    if (notesFor(state.year, state.month, day).length){
+      const ndot = document.createElement('span');
+      ndot.className = 'note-dot';
+      cell.appendChild(ndot);
     }
 
     cell.addEventListener('click', () => { state.focusDay = day; openDetails(state.year, state.month, day); });
@@ -725,8 +824,99 @@ function openDetails(y,m,d){
     evBlock.appendChild(p);
   }
   body.appendChild(evBlock);
+  body.appendChild(renderNotesSection(y,m,d));
   el('detailDialog').showModal();
   render();
+}
+
+function renderNotesSection(y,m,d){
+  const ne = state.lang==='ne';
+  const wrap = document.createElement('div');
+  wrap.className = 'notes-block';
+
+  const heading = document.createElement('h3');
+  heading.className = 'notes-heading';
+  heading.textContent = ne ? 'नोटहरू' : 'Notes';
+  wrap.appendChild(heading);
+
+  const list = document.createElement('div');
+  wrap.appendChild(list);
+
+  function renderList(){
+    list.innerHTML = '';
+    const items = notesFor(y,m,d);
+    if (!items.length){
+      const p = document.createElement('div');
+      p.className = 'muted';
+      p.textContent = ne ? 'यस दिन कुनै नोट छैन।' : 'No notes for this day yet.';
+      list.appendChild(p);
+      return;
+    }
+    items.forEach(n=>{
+      const row = document.createElement('div');
+      row.className = 'note-item';
+      const span = document.createElement('span');
+      span.textContent = n.note;
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'note-del';
+      del.setAttribute('aria-label', ne ? 'नोट मेटाउनुहोस्' : 'Delete note');
+      del.textContent = '✕';
+      del.addEventListener('click', async ()=>{
+        del.disabled = true;
+        try { await deleteNote(n.id, y, m, d); renderList(); }
+        catch(e){ status.textContent = ne ? 'मेटाउन असफल भयो' : 'Failed to delete note.'; status.classList.add('error'); del.disabled=false; }
+      });
+      row.appendChild(span);
+      row.appendChild(del);
+      list.appendChild(row);
+    });
+  }
+  renderList();
+
+  const form = document.createElement('div');
+  form.className = 'note-form';
+  const ta = document.createElement('textarea');
+  ta.rows = 2;
+  ta.maxLength = 500;
+  ta.placeholder = ne ? 'नोट लेख्नुहोस्...' : 'Write a note...';
+  ta.setAttribute('aria-label', ne ? 'नयाँ नोट' : 'New note');
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'primary';
+  btn.textContent = ne ? 'थप्नुहोस्' : 'Add';
+  const status = document.createElement('div');
+  status.className = 'muted note-status';
+  if (!sb){
+    status.textContent = ne ? 'नोट सुविधा उपलब्ध छैन (अफलाइन)।' : 'Notes are unavailable right now (offline).';
+    ta.disabled = true; btn.disabled = true;
+  }
+  form.appendChild(ta);
+  form.appendChild(btn);
+  form.appendChild(status);
+  wrap.appendChild(form);
+
+  btn.addEventListener('click', async ()=>{
+    const text = ta.value.trim();
+    if (!text) return;
+    btn.disabled = true;
+    status.classList.remove('error');
+    status.textContent = ne ? 'सुरक्षित गर्दै...' : 'Saving...';
+    try {
+      await addNote(y,m,d,text);
+      ta.value = '';
+      status.textContent = '';
+      renderList();
+    } catch(e){
+      console.error(e);
+      status.textContent = ne ? 'सुरक्षित गर्न असफल भयो।' : 'Failed to save note.';
+      status.classList.add('error');
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  return wrap;
 }
 el('detailClose').addEventListener('click', ()=> el('detailDialog').close());
 
@@ -940,6 +1130,7 @@ function renderTests(){
 populateConverterSelects();
 render();
 renderTests();
+loadAllNotes().catch(e => console.error('Failed to load notes', e));
 </script>
 </body>
 </html>
